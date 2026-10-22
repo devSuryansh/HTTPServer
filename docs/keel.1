@@ -1,0 +1,140 @@
+.TH KEEL 1 "October 2026" "keel 0.1.0" "User Commands"
+.SH NAME
+keel \- HTTP/1.1 static file server
+.SH SYNOPSIS
+.B keel
+.RB [ \-\-config
+.IR file ]
+.RB [ \-\-bind
+.IR address ]
+.RB [ \-\-port
+.IR port ]
+.RB [ \-\-root
+.IR directory ]
+.RB [ \-\-workers
+.IR n ]
+.RB [ \-\-access\-log
+.IR path ]
+.RB [ \-\-error\-log
+.IR path ]
+.PP
+.B keel
+.B \-h
+|
+.B \-\-help
+.PP
+.B keel
+.B \-v
+|
+.B \-\-version
+.SH DESCRIPTION
+.B keel
+serves files over HTTP/1.1 from a single document root.
+It is intended to run on Linux.
+Put TLS on a reverse proxy in front of it when clients are not on a trusted network.
+.PP
+With no arguments,
+.B keel
+listens on 0.0.0.0 port 8080 and serves the current directory.
+Flags override the same settings in a config file.
+.SH OPTIONS
+.TP
+.B \-h, \-\-help
+Print usage and exit.
+.TP
+.B \-v, \-\-version
+Print the version and exit.
+.TP
+.BI \-\-config " file"
+Read
+.I file
+before applying flags.
+The file is line oriented:
+a key, then a value.
+Lines starting with # are comments.
+An example ships with the source as keel.conf.example.
+.TP
+.BI \-\-bind " address"
+Local address to listen on.
+The default is 0.0.0.0.
+An IPv6 address, including ::, is accepted.
+.TP
+.BI \-\-port " port"
+TCP port.
+0 selects an ephemeral port, which is printed at startup.
+.TP
+.BI \-\-root " directory"
+Document root.
+The path must be a directory.
+.TP
+.BI \-\-workers " n"
+Number of event-loop threads.
+0, the default, uses one worker per online CPU.
+.TP
+.BI \-\-access\-log " path"
+Combined access log.
+The default is standard output.
+.TP
+.BI \-\-error\-log " path"
+Error log.
+The default is standard error.
+.SH CONFIGURATION
+Each non-empty, non-comment line is a key and a value.
+Values with spaces may be quoted.
+The keys are
+.BR bind ,
+.BR port ,
+.BR root ,
+.BR workers ,
+.BR max_connections ,
+.BR header_timeout_ms ,
+.BR keepalive_timeout_ms ,
+.BR write_timeout_ms ,
+.BR max_header_bytes ,
+.BR max_requests_per_conn ,
+.BR index ,
+.BR directory_listing ,
+.BR server_name ,
+.BR server_header ,
+.BR access_log ,
+.BR error_log ,
+and
+.BR log_level .
+.PP
+.B directory_listing
+is
+.BR on " or " off .
+It defaults to off.
+.B log_level
+is
+.BR error ,
+.BR warn ,
+.BR info ,
+or
+.BR debug .
+.B server_name ,
+when set, requires the Host header to match.
+An empty
+.B server_header
+omits the Server response header.
+.SH SIGNALS
+.TP
+.B SIGINT, SIGTERM
+Stop accepting, close idle connections, finish work already in progress for up to five seconds, then exit 0.
+.TP
+.B SIGHUP
+Reopen the access and error logs.
+The listen address and document root stay as they were at startup.
+.TP
+.B SIGPIPE
+Ignored.
+.SH FILES
+A running server also recognizes
+.I errors/NNN.html
+under the document root as the body for HTTP status
+.IR NNN .
+.SH EXIT STATUS
+.B keel
+exits 0 after a clean shutdown, 1 on a startup failure, and 2 when the command line or config file is invalid.
+.SH SEE ALSO
+The README in the source tree.

@@ -1,0 +1,26 @@
+# bind 0.0.0.0
+# port 8080
+# root ./examples/site
+# workers 0
+# max_connections 1024
+# header_timeout_ms 5000
+# keepalive_timeout_ms 10000
+# write_timeout_ms 30000
+# max_header_bytes 8192
+# max_requests_per_conn 1000
+# index index.html
+# directory_listing off
+# server_name
+# server_header keel
+# access_log
+# error_log
+# log_level info
+
+bind 0.0.0.0
+port 8080
+root ./examples/site
+workers 0
+index index.html
+directory_listing off
+server_header keel
+log_level info

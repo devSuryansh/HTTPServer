@@ -16,7 +16,7 @@ LIB_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRC))
 TEST_SRC := $(wildcard tests/test_*.c)
 TEST_BIN := $(patsubst tests/%.c,$(BUILD)/%,$(TEST_SRC))
 
-.PHONY: all clean test asan clean-objs
+.PHONY: all clean test asan clean-objs install
 .PRECIOUS: $(BUILD)/%.o
 
 -include $(BUILD)/sanitize.mk
@@ -53,5 +53,12 @@ clean-objs:
 
 clean:
 	rm -rf $(BUILD) keel
+
+PREFIX ?= /usr/local
+install: keel docs/keel.1
+	install -d $(DESTDIR)$(PREFIX)/bin
+	install -m 755 keel $(DESTDIR)$(PREFIX)/bin/keel
+	install -d $(DESTDIR)$(PREFIX)/share/man/man1
+	install -m 644 docs/keel.1 $(DESTDIR)$(PREFIX)/share/man/man1/keel.1
 
 -include $(DEP)
