@@ -16,7 +16,7 @@ The binary is `./keel`. `make clean` removes it and the object tree under `build
 ./keel
 ```
 
-keel listens on `0.0.0.0:8080`. Each accepted connection is logged and closed.
+keel listens on `0.0.0.0:8080`. A well formed request receives an empty `200 OK`. A malformed request receives the matching status, and the connection closes.
 
 ## Test
 

@@ -32,6 +32,9 @@ int main(int argc, char **argv) {
             continue;
         }
         fprintf(stderr, "keel: accepted %s:%s\n", peer.host, peer.port);
+        if (keel_handle_connection(client) != 0) {
+            fprintf(stderr, "keel: client %s:%s: %s\n", peer.host, peer.port, strerror(errno));
+        }
         close(client);
     }
 }

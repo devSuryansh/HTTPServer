@@ -6,17 +6,17 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prot
 LDFLAGS ?= -pthread
 BUILD   ?= build
 
-SRC := src/main.c src/net.c
+LIB_SRC := src/net.c src/url.c src/http_parse.c src/serve_block.c
+SRC := src/main.c $(LIB_SRC)
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
-
-LIB_SRC := src/net.c
 LIB_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRC))
 
 TEST_SRC := $(wildcard tests/test_*.c)
 TEST_BIN := $(patsubst tests/%.c,$(BUILD)/%,$(TEST_SRC))
 
 .PHONY: all clean test
+.PRECIOUS: $(BUILD)/%.o
 
 all: keel
 
