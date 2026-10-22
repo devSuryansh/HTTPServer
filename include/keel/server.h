@@ -1,6 +1,7 @@
 #ifndef KEEL_SERVER_H
 #define KEEL_SERVER_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define KEEL_HOST_MAX 128
@@ -24,7 +25,22 @@ int keel_accept(int listen_fd, struct keel_addr *peer);
 
 void keel_listener_close(struct keel_listener *lst);
 
-/* Read one request and answer it from root_fd. The caller closes client_fd. */
-int keel_handle_connection(int client_fd, int root_fd);
+struct keel_serve_opts {
+    int header_timeout_ms;
+    int keepalive_timeout_ms;
+    int write_timeout_ms;
+    int max_requests;
+    int max_connections;
+    size_t max_header_bytes;
+};
+
+void keel_serve_opts_init(struct keel_serve_opts *opts);
+
+/* Read requests and answer them from root_fd. NULL opts uses defaults.
+   The caller closes client_fd. */
+int keel_handle_connection(int client_fd, int root_fd, const struct keel_serve_opts *opts);
+
+/* Accept on listen_fd until a termination signal asks the process to drain. */
+int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts);
 
 #endif

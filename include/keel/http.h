@@ -125,6 +125,7 @@ struct keel_response {
     bool send_allow;
     bool has_location;
     char content_type[128];
+    char date[64];
     char location[KEEL_TARGET_MAX];
     int file_fd;
     off_t file_size;
@@ -144,6 +145,9 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
 
 /* Write status line, headers, and body. HEAD skips the body. */
 int keel_write_blocking(int fd, const struct keel_response *resp);
+
+/* Serialize the status line and headers, including the final blank line. */
+int keel_format_head(const struct keel_response *resp, char *dst, size_t cap, size_t *out_len);
 
 /* IMF-fix date in UTC, independent of the process locale. */
 int keel_format_http_date(char *dst, size_t cap, time_t when);

@@ -348,7 +348,7 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
     keel_response_init(resp);
     resp->http_minor = req->http_minor;
     resp->head_only = (req->method == KEEL_METHOD_HEAD);
-    resp->close_after = true;
+    resp->close_after = req->close_connection;
 
     if (req->http_minor >= 1 && !req->has_host) {
         keel_response_set_error(resp, 400, req->http_minor);

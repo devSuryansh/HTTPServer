@@ -50,12 +50,16 @@ static void bprintf(struct bytebuf *buf, const char *fmt, ...) {
     buf->len += (size_t)nw;
 }
 
-static int format_head(const struct keel_response *resp, char *dst, size_t cap, size_t *out_len) {
+int keel_format_head(const struct keel_response *resp, char *dst, size_t cap, size_t *out_len) {
     struct bytebuf buf = {.data = dst, .len = 0, .cap = cap, .overflow = false};
     bprintf(&buf, "HTTP/1.%d %d %s\r\n", resp->http_minor, resp->status, keel_status_reason(resp->status));
-    char date[64];
-    if (keel_format_http_date(date, sizeof date, time(NULL)) == 0) {
-        bprintf(&buf, "Date: %s\r\n", date);
+    if (resp->date[0] != '\0') {
+        bprintf(&buf, "Date: %s\r\n", resp->date);
+    } else {
+        char date[64];
+        if (keel_format_http_date(date, sizeof date, time(NULL)) == 0) {
+            bprintf(&buf, "Date: %s\r\n", date);
+        }
     }
     bprintf(&buf, "Server: keel\r\n");
     if (resp->content_type[0] != '\0') {
@@ -108,7 +112,7 @@ static int write_all(int fd, const char *buf, size_t len) {
 int keel_write_blocking(int fd, const struct keel_response *resp) {
     char head[4096];
     size_t head_len = 0;
-    if (format_head(resp, head, sizeof head, &head_len) != 0) {
+    if (keel_format_head(resp, head, sizeof head, &head_len) != 0) {
         return -1;
     }
     if (write_all(fd, head, head_len) != 0) {

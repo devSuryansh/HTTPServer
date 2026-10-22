@@ -73,23 +73,12 @@ int main(int argc, char **argv) {
 
     fprintf(stderr, "keel %s: listening on %s:%s\n", KEEL_VERSION, lst.local.host, lst.local.port);
 
-    for (;;) {
-        struct keel_addr peer;
-        int client = keel_accept(lst.fd, &peer);
-        if (client < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            fprintf(stderr, "keel: accept: %s\n", strerror(errno));
-            if (errno == EMFILE || errno == ENFILE || errno == ENOMEM || errno == ENOBUFS) {
-                usleep(10000);
-            }
-            continue;
-        }
-        fprintf(stderr, "keel: accepted %s:%s\n", peer.host, peer.port);
-        if (keel_handle_connection(client, root_fd) != 0) {
-            fprintf(stderr, "keel: client %s:%s: %s\n", peer.host, peer.port, strerror(errno));
-        }
-        close(client);
+    int rc = keel_serve(lst.fd, root_fd, NULL);
+    close(root_fd);
+    keel_listener_close(&lst);
+    if (rc != 0) {
+        fprintf(stderr, "keel: %s\n", strerror(errno));
+        return 1;
     }
+    return 0;
 }
