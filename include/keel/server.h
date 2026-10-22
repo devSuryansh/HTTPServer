@@ -31,6 +31,7 @@ struct keel_serve_opts {
     int write_timeout_ms;
     int max_requests;
     int max_connections;
+    int workers;
     size_t max_header_bytes;
 };
 

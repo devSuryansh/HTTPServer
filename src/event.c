@@ -3,11 +3,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/eventfd.h>
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <time.h>
@@ -49,6 +52,7 @@ struct keel_conn {
 };
 
 struct keel_loop {
+    int id;
     int epfd;
     int root_fd;
     int listen_fd;
@@ -97,6 +101,7 @@ void keel_serve_opts_init(struct keel_serve_opts *opts) {
     opts->write_timeout_ms = 30000;
     opts->max_requests = 1000;
     opts->max_connections = 1024;
+    opts->workers = 0;
     opts->max_header_bytes = 8192;
 }
 
@@ -124,6 +129,18 @@ static struct keel_serve_opts normalize_opts(const struct keel_serve_opts *in) {
     }
     if (opts.max_connections > 4096) {
         opts.max_connections = 4096;
+    }
+    if (opts.workers <= 0) {
+        long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+        if (ncpu < 1) {
+            ncpu = 1;
+        }
+        if (ncpu > 64) {
+            ncpu = 64;
+        }
+        opts.workers = (int)ncpu;
+    } else if (opts.workers > 64) {
+        opts.workers = 64;
     }
     if (opts.max_header_bytes < 64) {
         opts.max_header_bytes = 64;
@@ -540,7 +557,7 @@ static void start_drain(struct keel_loop *loop) {
 static int add_listen(struct keel_loop *loop) {
     struct epoll_event ev;
     memset(&ev, 0, sizeof ev);
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN | EPOLLEXCLUSIVE;
     ev.data.u32 = TAG_LISTEN;
     if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, loop->listen_fd, &ev) != 0) {
         return -1;
@@ -655,6 +672,11 @@ static void destroy_loop(struct keel_loop *loop) {
     free(loop->arena);
     if (loop->epfd >= 0) {
         close(loop->epfd);
+        loop->epfd = -1;
+    }
+    if (loop->wake_fd >= 0) {
+        close(loop->wake_fd);
+        loop->wake_fd = -1;
     }
 }
 
@@ -718,74 +740,29 @@ int keel_handle_connection(int client_fd, int root_fd, const struct keel_serve_o
     return failed;
 }
 
-int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in) {
-    if (set_nonblock(listen_fd) != 0) {
-        return -1;
-    }
-    struct keel_loop loop;
-    memset(&loop, 0, sizeof loop);
-    loop.epfd = -1;
-    loop.listen_fd = listen_fd;
-    loop.wake_fd = -1;
-    loop.root_fd = root_fd;
-    loop.owns_sockets = true;
-    loop.opts = normalize_opts(opts_in);
-    if (setup_slab(&loop) != 0) {
-        return -1;
-    }
-    loop.epfd = epoll_create1(EPOLL_CLOEXEC);
-    if (loop.epfd < 0) {
-        destroy_loop(&loop);
-        return -1;
-    }
-    if (pipe2(g_signal_pipe, O_NONBLOCK | O_CLOEXEC) != 0) {
-        destroy_loop(&loop);
-        return -1;
-    }
-    loop.wake_fd = g_signal_pipe[0];
-    struct epoll_event wake;
-    memset(&wake, 0, sizeof wake);
-    wake.events = EPOLLIN;
-    wake.data.u32 = TAG_WAKE;
-    if (epoll_ctl(loop.epfd, EPOLL_CTL_ADD, loop.wake_fd, &wake) != 0 || add_listen(&loop) != 0) {
-        close(g_signal_pipe[0]);
-        close(g_signal_pipe[1]);
-        g_signal_pipe[0] = -1;
-        g_signal_pipe[1] = -1;
-        destroy_loop(&loop);
-        return -1;
-    }
+static void run_loop(struct keel_loop *loop) {
+    char name[16];
+    snprintf(name, sizeof name, "keel-%d", loop->id);
+    pthread_setname_np(pthread_self(), name);
 
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
-    sigaction(SIGHUP, &sa, NULL);
-    signal(SIGPIPE, SIG_IGN);
-    g_stop = 0;
-    g_hup = 0;
-
-    while (!loop.draining || loop.active > 0) {
-        if (g_stop && !loop.draining) {
-            start_drain(&loop);
+    while (!loop->draining || loop->active > 0) {
+        if (g_stop && !loop->draining) {
+            start_drain(loop);
         }
-        if (g_hup) {
-            g_hup = 0;
+        if (loop->draining && loop->active == 0) {
+            break;
         }
         uint64_t now = mono_ms();
-        if (!loop.draining && !loop.accepting && loop.accept_backoff_until != 0 &&
-            now >= loop.accept_backoff_until) {
-            loop.accept_backoff_until = 0;
-            if (add_listen(&loop) != 0) {
-                pause_accept(&loop, 50);
+        if (!loop->draining && !loop->accepting && loop->accept_backoff_until != 0 &&
+            now >= loop->accept_backoff_until) {
+            loop->accept_backoff_until = 0;
+            if (add_listen(loop) != 0) {
+                pause_accept(loop, 50);
             }
         }
-        int timeout = next_timeout(&loop, now);
+        int timeout = next_timeout(loop, now);
         struct epoll_event events[64];
-        int n = epoll_wait(loop.epfd, events, 64, timeout);
+        int n = epoll_wait(loop->epfd, events, 64, timeout);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -795,39 +772,176 @@ int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in
         for (int i = 0; i < n; i++) {
             uint32_t tag = events[i].data.u32;
             if (tag == TAG_WAKE) {
-                unsigned char scratch[32];
-                while (read(loop.wake_fd, scratch, sizeof scratch) > 0) {
+                uint64_t value = 0;
+                while (read(loop->wake_fd, &value, sizeof value) > 0) {
                 }
                 continue;
             }
             if (tag == TAG_LISTEN) {
-                accept_ready(&loop);
+                accept_ready(loop);
                 continue;
             }
-            if (tag >= (uint32_t)loop.capacity) {
+            if (tag >= (uint32_t)loop->capacity) {
                 continue;
             }
-            struct keel_conn *conn = &loop.conns[tag];
+            struct keel_conn *conn = &loop->conns[tag];
             if (!conn->in_use) {
                 continue;
             }
             if ((events[i].events & (EPOLLERR | EPOLLHUP)) != 0 &&
                 (events[i].events & (EPOLLIN | EPOLLOUT)) == 0) {
-                release_conn(&loop, conn);
+                release_conn(loop, conn);
                 continue;
             }
-            conn_progress(&loop, conn);
+            conn_progress(loop, conn);
         }
-        sweep_deadlines(&loop);
-        if (loop.draining && loop.active == 0) {
+        sweep_deadlines(loop);
+        if (loop->draining && loop->active == 0) {
             break;
         }
-        if (loop.draining && mono_ms() >= loop.drain_deadline) {
+        if (loop->draining && mono_ms() >= loop->drain_deadline) {
             break;
         }
     }
+}
 
-    destroy_loop(&loop);
+static void *worker_thread(void *arg) {
+    run_loop(arg);
+    return NULL;
+}
+
+static void wake_loop(struct keel_loop *loop) {
+    uint64_t one = 1;
+    ssize_t n = write(loop->wake_fd, &one, sizeof one);
+    (void)n;
+}
+
+static int open_worker(struct keel_loop *loop, int id, int listen_fd, int root_fd,
+                       const struct keel_serve_opts *opts) {
+    memset(loop, 0, sizeof *loop);
+    loop->id = id;
+    loop->epfd = -1;
+    loop->wake_fd = -1;
+    loop->listen_fd = listen_fd;
+    loop->root_fd = root_fd;
+    loop->owns_sockets = true;
+    loop->opts = *opts;
+    if (setup_slab(loop) != 0) {
+        return -1;
+    }
+    loop->epfd = epoll_create1(EPOLL_CLOEXEC);
+    loop->wake_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (loop->epfd < 0 || loop->wake_fd < 0) {
+        destroy_loop(loop);
+        return -1;
+    }
+    struct epoll_event wake;
+    memset(&wake, 0, sizeof wake);
+    wake.events = EPOLLIN;
+    wake.data.u32 = TAG_WAKE;
+    if (epoll_ctl(loop->epfd, EPOLL_CTL_ADD, loop->wake_fd, &wake) != 0 || add_listen(loop) != 0) {
+        destroy_loop(loop);
+        return -1;
+    }
+    return 0;
+}
+
+int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in) {
+    if (set_nonblock(listen_fd) != 0) {
+        return -1;
+    }
+    struct keel_serve_opts opts = normalize_opts(opts_in);
+    int nworkers = opts.workers;
+    fprintf(stderr, "keel: %d workers\n", nworkers);
+
+    if (pipe2(g_signal_pipe, O_NONBLOCK | O_CLOEXEC) != 0) {
+        return -1;
+    }
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    /* Workers inherit this mask, so shutdown signals are delivered to the
+       thread waiting in ppoll, which is the one reading the self-pipe. */
+    sigset_t blocked;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGINT);
+    sigaddset(&blocked, SIGTERM);
+    sigaddset(&blocked, SIGHUP);
+    pthread_sigmask(SIG_BLOCK, &blocked, NULL);
+    g_stop = 0;
+    g_hup = 0;
+
+    struct keel_loop *loops = calloc((size_t)nworkers, sizeof *loops);
+    pthread_t *threads = calloc((size_t)nworkers, sizeof *threads);
+    if (loops == NULL || threads == NULL) {
+        free(loops);
+        free(threads);
+        close(g_signal_pipe[0]);
+        close(g_signal_pipe[1]);
+        g_signal_pipe[0] = -1;
+        g_signal_pipe[1] = -1;
+        errno = ENOMEM;
+        return -1;
+    }
+
+    int started = 0;
+    for (int i = 0; i < nworkers; i++) {
+        if (open_worker(&loops[i], i, listen_fd, root_fd, &opts) != 0) {
+            break;
+        }
+        if (pthread_create(&threads[i], NULL, worker_thread, &loops[i]) != 0) {
+            destroy_loop(&loops[i]);
+            break;
+        }
+        started++;
+    }
+
+    if (started == nworkers) {
+        struct pollfd pfd;
+        pfd.fd = g_signal_pipe[0];
+        pfd.events = POLLIN;
+        sigset_t empty;
+        sigemptyset(&empty);
+        while (!g_stop) {
+            struct timespec tick;
+            tick.tv_sec = 1;
+            tick.tv_nsec = 0;
+            int pr = ppoll(&pfd, 1, &tick, &empty);
+            if (pr < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            if (pr == 0) {
+                continue;
+            }
+            unsigned char scratch[32];
+            while (read(g_signal_pipe[0], scratch, sizeof scratch) > 0) {
+            }
+            if (g_hup) {
+                g_hup = 0;
+            }
+        }
+    } else {
+        g_stop = 1;
+    }
+
+    for (int i = 0; i < started; i++) {
+        wake_loop(&loops[i]);
+    }
+    for (int i = 0; i < started; i++) {
+        pthread_join(threads[i], NULL);
+        destroy_loop(&loops[i]);
+    }
+    free(loops);
+    free(threads);
     close(g_signal_pipe[0]);
     close(g_signal_pipe[1]);
     g_signal_pipe[0] = -1;
@@ -835,5 +949,5 @@ int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
     signal(SIGHUP, SIG_DFL);
-    return 0;
+    return started == nworkers ? 0 : -1;
 }
