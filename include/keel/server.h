@@ -1,6 +1,7 @@
 #ifndef KEEL_SERVER_H
 #define KEEL_SERVER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -25,6 +26,13 @@ int keel_accept(int listen_fd, struct keel_addr *peer);
 
 void keel_listener_close(struct keel_listener *lst);
 
+struct keel_vhost {
+    char index_name[256];
+    bool directory_listing;
+    char server_name[256];
+    char server_header[64];
+};
+
 struct keel_serve_opts {
     int header_timeout_ms;
     int keepalive_timeout_ms;
@@ -41,7 +49,9 @@ void keel_serve_opts_init(struct keel_serve_opts *opts);
    The caller closes client_fd. */
 int keel_handle_connection(int client_fd, int root_fd, const struct keel_serve_opts *opts);
 
-/* Accept on listen_fd until a termination signal asks the process to drain. */
-int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts);
+/* Accept on listen_fd until a termination signal asks the process to drain.
+   site may be NULL. */
+int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts,
+               const struct keel_vhost *site);
 
 #endif

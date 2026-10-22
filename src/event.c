@@ -1,4 +1,5 @@
 #include "keel/http.h"
+#include "keel/log.h"
 #include "keel/server.h"
 
 #include <errno.h>
@@ -46,6 +47,12 @@ struct keel_conn {
     const char *mem;
     size_t mem_len;
     size_t mem_sent;
+    unsigned long long body_sent;
+    int log_status;
+    char log_line[512];
+    char log_referer[512];
+    char log_ua[512];
+    char *owned_body;
     int32_t next_free;
     char peer_host[KEEL_HOST_MAX];
     char peer_port[KEEL_PORT_MAX];
@@ -62,6 +69,10 @@ struct keel_loop {
     bool draining;
     uint64_t drain_deadline;
     uint64_t accept_backoff_until;
+    char index_name[256];
+    bool directory_listing;
+    char server_name[256];
+    char server_header[64];
     struct keel_serve_opts opts;
     struct keel_conn *conns;
     int capacity;
@@ -201,6 +212,8 @@ static void release_conn(struct keel_loop *loop, struct keel_conn *conn) {
         close(conn->file_fd);
         conn->file_fd = -1;
     }
+    free(conn->owned_body);
+    conn->owned_body = NULL;
     conn->in_use = false;
     conn->in_len = 0;
     if (conn->pooled) {
@@ -214,6 +227,11 @@ static void release_conn(struct keel_loop *loop, struct keel_conn *conn) {
 
 static int begin_write(struct keel_conn *conn, struct keel_loop *loop, struct keel_response *resp) {
     conn->close_after = resp->close_after;
+    conn->log_status = resp->status;
+    conn->body_sent = 0;
+    if (resp->server[0] == '\0' && loop->server_header[0] != '\0') {
+        snprintf(resp->server, sizeof resp->server, "%s", loop->server_header);
+    }
     if (keel_format_head(resp, conn->head, sizeof conn->head, &conn->head_len) != 0) {
         return -1;
     }
@@ -234,9 +252,18 @@ static int begin_write(struct keel_conn *conn, struct keel_loop *loop, struct ke
         conn->use_file = true;
         conn->body_off = resp->body_off;
         conn->body_end = resp->body_off + resp->file_size;
+    } else if (!resp->head_only && resp->mem_owned != NULL && resp->mem_len > 0) {
+        conn->owned_body = resp->mem_owned;
+        conn->mem = resp->mem_owned;
+        conn->mem_len = resp->mem_len;
+        resp->mem_owned = NULL;
     } else if (!resp->head_only && resp->mem != NULL && resp->mem_len > 0) {
         conn->mem = resp->mem;
         conn->mem_len = resp->mem_len;
+    }
+    if (resp->head_only && resp->mem_owned != NULL) {
+        free(resp->mem_owned);
+        resp->mem_owned = NULL;
     }
     if (resp->file_fd >= 0) {
         close(resp->file_fd);
@@ -264,8 +291,12 @@ static int finish_response(struct keel_conn *conn, struct keel_loop *loop) {
         conn->file_fd = -1;
     }
     conn->use_file = false;
+    free(conn->owned_body);
+    conn->owned_body = NULL;
     conn->mem = NULL;
     conn->mem_len = 0;
+    keel_log_access(conn->peer_host, conn->log_line, conn->log_status, conn->body_sent, conn->log_referer,
+                    conn->log_ua);
     conn->served++;
     if (conn->close_after || conn->served >= loop->opts.max_requests) {
         return STEP_DONE;
@@ -276,6 +307,24 @@ static int finish_response(struct keel_conn *conn, struct keel_loop *loop) {
         conn->deadline = mono_ms() + (uint64_t)loop->opts.keepalive_timeout_ms;
     }
     return STEP_MORE;
+}
+
+static void remember_request(struct keel_conn *conn, const struct keel_request *req) {
+    if (req != NULL && req->req_line[0] != '\0') {
+        snprintf(conn->log_line, sizeof conn->log_line, "%s", req->req_line);
+    } else {
+        snprintf(conn->log_line, sizeof conn->log_line, "-");
+    }
+    if (req != NULL && req->referer[0] != '\0') {
+        snprintf(conn->log_referer, sizeof conn->log_referer, "%s", req->referer);
+    } else {
+        snprintf(conn->log_referer, sizeof conn->log_referer, "-");
+    }
+    if (req != NULL && req->user_agent[0] != '\0') {
+        snprintf(conn->log_ua, sizeof conn->log_ua, "%s", req->user_agent);
+    } else {
+        snprintf(conn->log_ua, sizeof conn->log_ua, "-");
+    }
 }
 
 static int drop_consumed(struct keel_conn *conn, size_t consumed) {
@@ -307,6 +356,7 @@ static int do_read(struct keel_conn *conn, struct keel_loop *loop) {
         if (drop_consumed(conn, consumed) != 0) {
             return STEP_DONE;
         }
+        remember_request(conn, &parser.req);
         if (st != KEEL_PARSE_OK) {
             int status = keel_parse_to_status(st);
             if (status <= 0) {
@@ -318,7 +368,12 @@ static int do_read(struct keel_conn *conn, struct keel_loop *loop) {
             return STEP_MORE;
         }
         struct keel_response resp;
-        if (keel_prepare_static(&parser.req, loop->root_fd, "index.html", &resp) != 0) {
+        struct keel_site site = {
+            .index_name = loop->index_name[0] != '\0' ? loop->index_name : "index.html",
+            .directory_listing = loop->directory_listing,
+            .server_name = loop->server_name,
+        };
+        if (keel_prepare_site(&parser.req, loop->root_fd, &site, &resp) != 0) {
             if (queue_status(conn, loop, 500) != 0) {
                 return STEP_DONE;
             }
@@ -341,12 +396,14 @@ static int do_read(struct keel_conn *conn, struct keel_loop *loop) {
         if (conn->in_len == 0 && conn->served > 0) {
             return STEP_DONE;
         }
+        remember_request(conn, &parser.req);
         if (queue_status(conn, loop, 408) != 0) {
             return STEP_DONE;
         }
         return STEP_MORE;
     }
     if (conn->in_len >= conn->in_cap) {
+        remember_request(conn, &parser.req);
         if (queue_status(conn, loop, 431) != 0) {
             return STEP_DONE;
         }
@@ -367,6 +424,7 @@ static int do_read(struct keel_conn *conn, struct keel_loop *loop) {
         if (conn->in_len == 0) {
             return STEP_DONE;
         }
+        remember_request(conn, &parser.req);
         if (queue_status(conn, loop, 400) != 0) {
             return STEP_DONE;
         }
@@ -421,6 +479,7 @@ static int do_write(struct keel_conn *conn, struct keel_loop *loop) {
         if (n == 0) {
             return STEP_DONE;
         }
+        conn->body_sent += (unsigned long long)n;
         conn->deadline = mono_ms() + (uint64_t)loop->opts.write_timeout_ms;
         return STEP_MORE;
     }
@@ -439,6 +498,7 @@ static int do_write(struct keel_conn *conn, struct keel_loop *loop) {
             return STEP_DONE;
         }
         conn->mem_sent += (size_t)n;
+        conn->body_sent += (unsigned long long)n;
         conn->deadline = mono_ms() + (uint64_t)loop->opts.write_timeout_ms;
         return STEP_MORE;
     }
@@ -693,6 +753,8 @@ int keel_handle_connection(int client_fd, int root_fd, const struct keel_serve_o
     loop.root_fd = root_fd;
     loop.owns_sockets = false;
     loop.opts = normalize_opts(opts_in);
+    snprintf(loop.index_name, sizeof loop.index_name, "index.html");
+    snprintf(loop.server_header, sizeof loop.server_header, "keel");
     loop.capacity = 1;
     loop.date_sec = 0;
 
@@ -817,8 +879,24 @@ static void wake_loop(struct keel_loop *loop) {
     (void)n;
 }
 
+static void copy_site(struct keel_loop *loop, const struct keel_vhost *site) {
+    snprintf(loop->index_name, sizeof loop->index_name, "index.html");
+    snprintf(loop->server_header, sizeof loop->server_header, "keel");
+    loop->directory_listing = false;
+    loop->server_name[0] = '\0';
+    if (site == NULL) {
+        return;
+    }
+    if (site->index_name[0] != '\0') {
+        snprintf(loop->index_name, sizeof loop->index_name, "%s", site->index_name);
+    }
+    snprintf(loop->server_header, sizeof loop->server_header, "%s", site->server_header);
+    loop->directory_listing = site->directory_listing;
+    snprintf(loop->server_name, sizeof loop->server_name, "%s", site->server_name);
+}
+
 static int open_worker(struct keel_loop *loop, int id, int listen_fd, int root_fd,
-                       const struct keel_serve_opts *opts) {
+                       const struct keel_serve_opts *opts, const struct keel_vhost *site) {
     memset(loop, 0, sizeof *loop);
     loop->id = id;
     loop->epfd = -1;
@@ -827,6 +905,7 @@ static int open_worker(struct keel_loop *loop, int id, int listen_fd, int root_f
     loop->root_fd = root_fd;
     loop->owns_sockets = true;
     loop->opts = *opts;
+    copy_site(loop, site);
     if (setup_slab(loop) != 0) {
         return -1;
     }
@@ -847,7 +926,8 @@ static int open_worker(struct keel_loop *loop, int id, int listen_fd, int root_f
     return 0;
 }
 
-int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in) {
+int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in,
+               const struct keel_vhost *site) {
     if (set_nonblock(listen_fd) != 0) {
         return -1;
     }
@@ -893,7 +973,7 @@ int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in
 
     int started = 0;
     for (int i = 0; i < nworkers; i++) {
-        if (open_worker(&loops[i], i, listen_fd, root_fd, &opts) != 0) {
+        if (open_worker(&loops[i], i, listen_fd, root_fd, &opts, site) != 0) {
             break;
         }
         if (pthread_create(&threads[i], NULL, worker_thread, &loops[i]) != 0) {
@@ -928,6 +1008,7 @@ int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in
             }
             if (g_hup) {
                 g_hup = 0;
+                keel_log_reopen();
             }
         }
     } else {

@@ -128,6 +128,7 @@ struct keel_response {
     bool accept_ranges;
     bool partial;
     bool range_unsatisfiable;
+    char server[64];
     char content_type[128];
     char date[64];
     char etag[80];
@@ -140,6 +141,7 @@ struct keel_response {
     off_t range_end;
     off_t range_total;
     const char *mem;
+    char *mem_owned;
     size_t mem_len;
 };
 
@@ -149,7 +151,14 @@ void keel_response_set_error(struct keel_response *resp, int status, int http_mi
 
 const char *keel_mime_type(const char *rel_path);
 
-/* Fill resp for a parsed request. root_fd is a directory descriptor. */
+struct keel_site {
+    const char *index_name;
+    bool directory_listing;
+    const char *server_name;
+};
+
+int keel_prepare_site(const struct keel_request *req, int root_fd, const struct keel_site *site,
+                      struct keel_response *resp);
 int keel_prepare_static(const struct keel_request *req, int root_fd, const char *index_name,
                         struct keel_response *resp);
 

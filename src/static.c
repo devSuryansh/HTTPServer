@@ -1,10 +1,12 @@
 #include "keel/http.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <linux/openat2.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -246,13 +248,17 @@ void keel_response_clear(struct keel_response *resp) {
         close(resp->file_fd);
         resp->file_fd = -1;
     }
+    free(resp->mem_owned);
+    resp->mem_owned = NULL;
 }
 
 void keel_response_set_error(struct keel_response *resp, int status, int http_minor) {
     bool head_only = resp->head_only;
     bool close_after = resp->close_after;
     int fd = resp->file_fd;
+    char *owned = resp->mem_owned;
     keel_response_init(resp);
+    free(owned);
     resp->head_only = head_only;
     resp->close_after = close_after;
     resp->http_minor = http_minor;
@@ -572,8 +578,213 @@ static bool index_name_ok(const char *index_name) {
     return true;
 }
 
-int keel_prepare_static(const struct keel_request *req, int root_fd, const char *index_name,
-                        struct keel_response *resp) {
+static bool host_matches(const char *host, const char *expect) {
+    if (expect == NULL || expect[0] == '\0') {
+        return true;
+    }
+    if (host == NULL || host[0] == '\0') {
+        return false;
+    }
+    char name[256];
+    size_t n = 0;
+    if (host[0] == '[') {
+        const char *end = strchr(host, ']');
+        if (end == NULL || end == host + 1) {
+            return false;
+        }
+        n = (size_t)(end - host - 1);
+    } else {
+        const char *colon = strchr(host, ':');
+        if (colon != NULL && strchr(colon + 1, ':') == NULL) {
+            const char *p = colon + 1;
+            int digits = *p != '\0';
+            while (*p != '\0') {
+                if (*p < '0' || *p > '9') {
+                    digits = 0;
+                    break;
+                }
+                p++;
+            }
+            n = digits ? (size_t)(colon - host) : strlen(host);
+        } else {
+            n = strlen(host);
+        }
+    }
+    if (n == 0 || n >= sizeof name) {
+        return false;
+    }
+    memcpy(name, host[0] == '[' ? host + 1 : host, n);
+    name[n] = '\0';
+    size_t en = strlen(expect);
+    if (en != n) {
+        return false;
+    }
+    for (size_t i = 0; i < n; i++) {
+        unsigned char a = (unsigned char)name[i];
+        unsigned char b = (unsigned char)expect[i];
+        if (a >= 'A' && a <= 'Z') {
+            a = (unsigned char)(a + ('a' - 'A'));
+        }
+        if (b >= 'A' && b <= 'Z') {
+            b = (unsigned char)(b + ('a' - 'A'));
+        }
+        if (a != b) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int append_text(char **buf, size_t *len, size_t *cap, const char *text, size_t n) {
+    if (*len + n + 1 > *cap) {
+        size_t next = *cap == 0 ? 4096 : *cap * 2;
+        while (next < *len + n + 1) {
+            next *= 2;
+        }
+        char *grown = realloc(*buf, next);
+        if (grown == NULL) {
+            return -1;
+        }
+        *buf = grown;
+        *cap = next;
+    }
+    memcpy(*buf + *len, text, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+    return 0;
+}
+
+static int append_cstr(char **buf, size_t *len, size_t *cap, const char *text) {
+    return append_text(buf, len, cap, text, strlen(text));
+}
+
+static int append_escaped(char **buf, size_t *len, size_t *cap, const char *text) {
+    for (const unsigned char *p = (const unsigned char *)text; *p != '\0'; p++) {
+        const char *rep = NULL;
+        char one[2];
+        size_t n = 1;
+        if (*p == '&') {
+            rep = "&amp;";
+            n = 5;
+        } else if (*p == '<') {
+            rep = "&lt;";
+            n = 4;
+        } else if (*p == '>') {
+            rep = "&gt;";
+            n = 4;
+        } else if (*p == '"') {
+            rep = "&quot;";
+            n = 6;
+        } else if (*p < 32 || *p == 127) {
+            continue;
+        } else {
+            one[0] = (char)*p;
+            one[1] = '\0';
+            rep = one;
+        }
+        if (append_text(buf, len, cap, rep, n) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int serve_listing(struct keel_response *resp, int root_fd, const char *rel,
+                         const struct keel_request *req) {
+    struct keel_opened opened;
+    enum keel_open_status st = keel_open_under_root(root_fd, rel, &opened);
+    if (st != KEEL_OPEN_DIR) {
+        keel_opened_close(&opened);
+        keel_response_set_error(resp, 403, req->http_minor);
+        return 0;
+    }
+    int fd = opened.fd;
+    opened.fd = -1;
+    DIR *dir = fdopendir(fd);
+    if (dir == NULL) {
+        close(fd);
+        keel_response_set_error(resp, 500, req->http_minor);
+        return 0;
+    }
+    char *html = NULL;
+    size_t len = 0;
+    size_t cap = 0;
+    int failed = append_cstr(&html, &len, &cap,
+                             "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><title>Index of ");
+    if (failed == 0) {
+        failed = append_escaped(&html, &len, &cap, req->path);
+    }
+    if (failed == 0) {
+        failed = append_cstr(&html, &len, &cap, "</title></head><body><h1>Index of ");
+    }
+    if (failed == 0) {
+        failed = append_escaped(&html, &len, &cap, req->path);
+    }
+    if (failed == 0) {
+        failed = append_cstr(&html, &len, &cap, "</h1><ul>\n");
+    }
+    int shown = 0;
+    while (failed == 0) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (entry == NULL) {
+            break;
+        }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+            continue;
+        }
+        if (shown == 512) {
+            failed = append_cstr(&html, &len, &cap, "<li>Further entries omitted.</li>\n");
+            break;
+        }
+        int is_dir = entry->d_type == DT_DIR;
+        if (entry->d_type == DT_UNKNOWN) {
+            struct stat stbuf;
+            if (fstatat(dirfd(dir), entry->d_name, &stbuf, AT_SYMLINK_NOFOLLOW) == 0 &&
+                S_ISDIR(stbuf.st_mode)) {
+                is_dir = 1;
+            }
+        }
+        failed = append_cstr(&html, &len, &cap, "<li><a href=\"");
+        if (failed == 0) {
+            failed = append_escaped(&html, &len, &cap, entry->d_name);
+        }
+        if (failed == 0 && is_dir) {
+            failed = append_text(&html, &len, &cap, "/", 1);
+        }
+        if (failed == 0) {
+            failed = append_cstr(&html, &len, &cap, "\">");
+        }
+        if (failed == 0) {
+            failed = append_escaped(&html, &len, &cap, entry->d_name);
+        }
+        if (failed == 0 && is_dir) {
+            failed = append_text(&html, &len, &cap, "/", 1);
+        }
+        if (failed == 0) {
+            failed = append_cstr(&html, &len, &cap, "</a></li>\n");
+        }
+        shown++;
+    }
+    closedir(dir);
+    if (failed == 0) {
+        failed = append_cstr(&html, &len, &cap, "</ul></body></html>\n");
+    }
+    if (failed != 0 || html == NULL) {
+        free(html);
+        keel_response_set_error(resp, 500, req->http_minor);
+        return 0;
+    }
+    resp->status = 200;
+    resp->mem = html;
+    resp->mem_owned = html;
+    resp->mem_len = len;
+    snprintf(resp->content_type, sizeof resp->content_type, "text/html; charset=utf-8");
+    return 0;
+}
+
+int keel_prepare_site(const struct keel_request *req, int root_fd, const struct keel_site *site,
+                      struct keel_response *resp) {
     if (req == NULL || resp == NULL) {
         return -1;
     }
@@ -581,8 +792,14 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
     resp->http_minor = req->http_minor;
     resp->head_only = (req->method == KEEL_METHOD_HEAD);
     resp->close_after = req->close_connection;
+    const char *index_name = (site != NULL && site->index_name != NULL) ? site->index_name : "index.html";
 
     if (req->http_minor >= 1 && !req->has_host) {
+        keel_response_set_error(resp, 400, req->http_minor);
+        return 0;
+    }
+    if (site != NULL && site->server_name != NULL && site->server_name[0] != '\0' &&
+        !host_matches(req->has_host ? req->host : NULL, site->server_name)) {
         keel_response_set_error(resp, 400, req->http_minor);
         return 0;
     }
@@ -656,10 +873,23 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
         return serve_file(resp, req, &opened, index_rel);
     }
     keel_opened_close(&opened);
+    if (st == KEEL_OPEN_NOT_FOUND && site != NULL && site->directory_listing) {
+        return serve_listing(resp, root_fd, rel, req);
+    }
     if (st == KEEL_OPEN_NOT_FOUND || st == KEEL_OPEN_DIR || st == KEEL_OPEN_FORBIDDEN) {
         keel_response_set_error(resp, 403, req->http_minor);
         return 0;
     }
     keel_response_set_error(resp, 500, req->http_minor);
     return 0;
+}
+
+int keel_prepare_static(const struct keel_request *req, int root_fd, const char *index_name,
+                        struct keel_response *resp) {
+    struct keel_site site = {
+        .index_name = index_name,
+        .directory_listing = false,
+        .server_name = NULL,
+    };
+    return keel_prepare_site(req, root_fd, &site, resp);
 }

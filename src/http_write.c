@@ -61,7 +61,9 @@ int keel_format_head(const struct keel_response *resp, char *dst, size_t cap, si
             bprintf(&buf, "Date: %s\r\n", date);
         }
     }
-    bprintf(&buf, "Server: keel\r\n");
+    if (resp->server[0] != '\0') {
+        bprintf(&buf, "Server: %s\r\n", resp->server);
+    }
     if (resp->content_type[0] != '\0') {
         bprintf(&buf, "Content-Type: %s\r\n", resp->content_type);
     }
