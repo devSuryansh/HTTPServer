@@ -204,6 +204,9 @@ static void release_conn(struct keel_loop *loop, struct keel_conn *conn) {
         epoll_ctl(loop->epfd, EPOLL_CTL_DEL, conn->fd, NULL);
         conn->armed = 0;
     }
+    if (conn->in_use) {
+        keel_metrics_connection(-1);
+    }
     if (loop->owns_sockets && conn->fd >= 0) {
         close(conn->fd);
     }
@@ -297,6 +300,7 @@ static int finish_response(struct keel_conn *conn, struct keel_loop *loop) {
     conn->mem_len = 0;
     keel_log_access(conn->peer_host, conn->log_line, conn->log_status, conn->body_sent, conn->log_referer,
                     conn->log_ua);
+    keel_metrics_response(conn->log_status, conn->body_sent);
     conn->served++;
     if (conn->close_after || conn->served >= loop->opts.max_requests) {
         return STEP_DONE;
@@ -368,16 +372,18 @@ static int do_read(struct keel_conn *conn, struct keel_loop *loop) {
             return STEP_MORE;
         }
         struct keel_response resp;
-        struct keel_site site = {
-            .index_name = loop->index_name[0] != '\0' ? loop->index_name : "index.html",
-            .directory_listing = loop->directory_listing,
-            .server_name = loop->server_name,
-        };
-        if (keel_prepare_site(&parser.req, loop->root_fd, &site, &resp) != 0) {
-            if (queue_status(conn, loop, 500) != 0) {
-                return STEP_DONE;
+        if (keel_try_builtin(&parser.req, &resp) == 0) {
+            struct keel_site site = {
+                .index_name = loop->index_name[0] != '\0' ? loop->index_name : "index.html",
+                .directory_listing = loop->directory_listing,
+                .server_name = loop->server_name,
+            };
+            if (keel_prepare_site(&parser.req, loop->root_fd, &site, &resp) != 0) {
+                if (queue_status(conn, loop, 500) != 0) {
+                    return STEP_DONE;
+                }
+                return STEP_MORE;
             }
-            return STEP_MORE;
         }
         stamp_date(loop, &resp);
         if (conn->served + 1 >= loop->opts.max_requests) {
@@ -532,6 +538,7 @@ static void conn_reset_new(struct keel_conn *conn, int fd, const struct keel_add
     conn->state = CONN_READ;
     conn->armed = 0;
     conn->in_use = true;
+    keel_metrics_connection(1);
     conn->header_started = false;
     conn->close_after = false;
     conn->use_file = false;
@@ -934,6 +941,7 @@ int keel_serve(int listen_fd, int root_fd, const struct keel_serve_opts *opts_in
     struct keel_serve_opts opts = normalize_opts(opts_in);
     int nworkers = opts.workers;
     fprintf(stderr, "keel: %d workers\n", nworkers);
+    keel_metrics_init();
 
     if (pipe2(g_signal_pipe, O_NONBLOCK | O_CLOEXEC) != 0) {
         return -1;

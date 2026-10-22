@@ -7,7 +7,7 @@ LDFLAGS ?= -pthread
 BUILD   ?= build
 
 LIB_SRC := src/net.c src/url.c src/http_parse.c src/mime.c src/static.c src/http_write.c \
-           src/config.c src/log.c src/event.c
+           src/config.c src/log.c src/handlers.c src/event.c
 SRC := src/main.c $(LIB_SRC)
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)

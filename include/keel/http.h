@@ -161,6 +161,11 @@ int keel_prepare_site(const struct keel_request *req, int root_fd, const struct 
                       struct keel_response *resp);
 int keel_prepare_static(const struct keel_request *req, int root_fd, const char *index_name,
                         struct keel_response *resp);
+int keel_try_builtin(const struct keel_request *req, struct keel_response *resp);
+void keel_metrics_init(void);
+void keel_metrics_connection(int delta);
+void keel_metrics_response(int status, unsigned long long nbytes);
+void keel_apply_error_page(struct keel_response *resp, int root_fd);
 
 /* Write status line, headers, and body. HEAD skips the body. */
 int keel_write_blocking(int fd, const struct keel_response *resp);
