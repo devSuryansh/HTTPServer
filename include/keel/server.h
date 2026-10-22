@@ -24,7 +24,7 @@ int keel_accept(int listen_fd, struct keel_addr *peer);
 
 void keel_listener_close(struct keel_listener *lst);
 
-/* Read one request and answer it. The caller closes client_fd. */
-int keel_handle_connection(int client_fd);
+/* Read one request and answer it from root_fd. The caller closes client_fd. */
+int keel_handle_connection(int client_fd, int root_fd);
 
 #endif

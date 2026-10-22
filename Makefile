@@ -6,7 +6,8 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prot
 LDFLAGS ?= -pthread
 BUILD   ?= build
 
-LIB_SRC := src/net.c src/url.c src/http_parse.c src/serve_block.c
+LIB_SRC := src/net.c src/url.c src/http_parse.c src/mime.c src/static.c src/http_write.c \
+           src/serve_block.c
 SRC := src/main.c $(LIB_SRC)
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #define KEEL_METHOD_MAX 32
 #define KEEL_TARGET_MAX 2048
@@ -93,5 +94,58 @@ const char *keel_status_reason(int status);
 
 /* Percent-decode. '+' stays '+'. Rejects bad hex, NUL, and decoded '/'. */
 int keel_url_decode(const char *src, size_t src_len, char *dst, size_t dst_cap);
+
+/* Turn a decoded origin-form path into a relative path under the document root.
+   rel is empty for the root itself. Returns -1 if the path leaves the root. */
+int keel_path_normalize(const char *decoded, char *rel, size_t rel_cap, bool *trailing_slash);
+
+enum keel_open_status {
+    KEEL_OPEN_FILE = 0,
+    KEEL_OPEN_DIR,
+    KEEL_OPEN_NOT_FOUND,
+    KEEL_OPEN_FORBIDDEN,
+    KEEL_OPEN_ERROR,
+};
+
+struct keel_opened {
+    int fd;
+    bool directory;
+    off_t size;
+    time_t mtime;
+};
+
+enum keel_open_status keel_open_under_root(int root_fd, const char *rel, struct keel_opened *out);
+void keel_opened_close(struct keel_opened *out);
+
+struct keel_response {
+    int status;
+    int http_minor;
+    bool head_only;
+    bool close_after;
+    bool send_allow;
+    bool has_location;
+    char content_type[128];
+    char location[KEEL_TARGET_MAX];
+    int file_fd;
+    off_t file_size;
+    const char *mem;
+    size_t mem_len;
+};
+
+void keel_response_init(struct keel_response *resp);
+void keel_response_clear(struct keel_response *resp);
+void keel_response_set_error(struct keel_response *resp, int status, int http_minor);
+
+const char *keel_mime_type(const char *rel_path);
+
+/* Fill resp for a parsed request. root_fd is a directory descriptor. */
+int keel_prepare_static(const struct keel_request *req, int root_fd, const char *index_name,
+                        struct keel_response *resp);
+
+/* Write status line, headers, and body. HEAD skips the body. */
+int keel_write_blocking(int fd, const struct keel_response *resp);
+
+/* IMF-fix date in UTC, independent of the process locale. */
+int keel_format_http_date(char *dst, size_t cap, time_t when);
 
 #endif

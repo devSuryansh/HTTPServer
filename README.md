@@ -13,10 +13,10 @@ The binary is `./keel`. `make clean` removes it and the object tree under `build
 ## Run
 
 ```bash
-./keel
+./keel --root ./public --port 8080
 ```
 
-keel listens on `0.0.0.0:8080`. A well formed request receives an empty `200 OK`. A malformed request receives the matching status, and the connection closes.
+keel serves files from `--root` (the current directory by default) on `--port` (8080 by default). `GET` and `HEAD` return the file. `/` serves `index.html`. A path that leaves the document root is rejected. Other methods receive `405`.
 
 ## Test
 
