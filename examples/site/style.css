@@ -1,0 +1,55 @@
+:root {
+  color-scheme: light dark;
+  --ink: #1c1915;
+  --paper: #f6f1e7;
+  --rule: #d9cbb6;
+  --accent: #8c3a2f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #f3eadc;
+    --paper: #1b1916;
+    --rule: #3a342c;
+    --accent: #e2a090;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
+  font: 18px/1.5 "Iowan Old Style", Palatino, "Palatino Linotype", serif;
+}
+
+header, main {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 1.5rem 1.25rem;
+}
+
+header {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  border-bottom: 1px solid var(--rule);
+}
+
+h1 {
+  margin: 0;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+}
+
+.kicker {
+  margin: 0;
+  font: 0.75rem/1.2 ui-sans-serif, system-ui, sans-serif;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+a { color: var(--accent); }

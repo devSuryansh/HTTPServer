@@ -1,0 +1,3 @@
+keel serves this file as text/plain.
+
+The same process also serves the HTML page, the stylesheet, and the SVG mark.

@@ -32,8 +32,13 @@ $(BUILD)/test_%: tests/test_%.c $(LIB_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -Itests -o $@ $< $(LIB_OBJ) $(LDFLAGS)
 
-test: $(TEST_BIN)
+$(BUILD)/integration: tests/integration.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests -o $@ $< $(LDFLAGS)
+
+test: keel $(TEST_BIN) $(BUILD)/integration
 	@set -e; for t in $(TEST_BIN); do echo "== $$t"; $$t; done
+	@echo "== $(BUILD)/integration"; $(BUILD)/integration
 
 clean:
 	rm -rf $(BUILD) keel
