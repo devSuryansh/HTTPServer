@@ -1,0 +1,13 @@
+*.o
+*.d
+*.out
+*.gcda
+*.gcno
+*.gcov
+/keel
+build/
+logs/
+compile_commands.json
+core
+vgcore.*
+.cache/
