@@ -65,16 +65,33 @@ int keel_format_head(const struct keel_response *resp, char *dst, size_t cap, si
     if (resp->content_type[0] != '\0') {
         bprintf(&buf, "Content-Type: %s\r\n", resp->content_type);
     }
-    unsigned long long length = 0;
-    if (resp->file_fd >= 0) {
-        if (resp->file_size < 0) {
-            return -1;
+    if (!resp->omit_length) {
+        unsigned long long length = 0;
+        if (resp->file_fd >= 0) {
+            if (resp->file_size < 0) {
+                return -1;
+            }
+            length = (unsigned long long)resp->file_size;
+        } else {
+            length = (unsigned long long)resp->mem_len;
         }
-        length = (unsigned long long)resp->file_size;
-    } else {
-        length = (unsigned long long)resp->mem_len;
+        bprintf(&buf, "Content-Length: %llu\r\n", length);
     }
-    bprintf(&buf, "Content-Length: %llu\r\n", length);
+    if (resp->etag[0] != '\0') {
+        bprintf(&buf, "ETag: %s\r\n", resp->etag);
+    }
+    if (resp->last_modified[0] != '\0') {
+        bprintf(&buf, "Last-Modified: %s\r\n", resp->last_modified);
+    }
+    if (resp->accept_ranges) {
+        bprintf(&buf, "Accept-Ranges: bytes\r\n");
+    }
+    if (resp->partial) {
+        bprintf(&buf, "Content-Range: bytes %llu-%llu/%llu\r\n", (unsigned long long)resp->range_start,
+                (unsigned long long)resp->range_end, (unsigned long long)resp->range_total);
+    } else if (resp->range_unsatisfiable) {
+        bprintf(&buf, "Content-Range: bytes */%llu\r\n", (unsigned long long)resp->range_total);
+    }
     bprintf(&buf, "Connection: %s\r\n", resp->close_after ? "close" : "keep-alive");
     bprintf(&buf, "X-Content-Type-Options: nosniff\r\n");
     if (resp->send_allow) {
@@ -123,13 +140,14 @@ int keel_write_blocking(int fd, const struct keel_response *resp) {
     }
     if (resp->file_fd >= 0) {
         off_t left = resp->file_size;
+        off_t pos = resp->body_off;
         char chunk[65536];
         while (left > 0) {
             size_t want = sizeof chunk;
             if ((off_t)want > left) {
                 want = (size_t)left;
             }
-            ssize_t n = read(resp->file_fd, chunk, want);
+            ssize_t n = pread(resp->file_fd, chunk, want, pos);
             if (n < 0) {
                 if (errno == EINTR) {
                     continue;
@@ -142,6 +160,7 @@ int keel_write_blocking(int fd, const struct keel_response *resp) {
             if (write_all(fd, chunk, (size_t)n) != 0) {
                 return -1;
             }
+            pos += n;
             left -= n;
         }
         return 0;

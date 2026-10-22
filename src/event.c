@@ -232,7 +232,8 @@ static int begin_write(struct keel_conn *conn, struct keel_loop *loop, struct ke
         conn->file_fd = resp->file_fd;
         resp->file_fd = -1;
         conn->use_file = true;
-        conn->body_end = resp->file_size;
+        conn->body_off = resp->body_off;
+        conn->body_end = resp->body_off + resp->file_size;
     } else if (!resp->head_only && resp->mem != NULL && resp->mem_len > 0) {
         conn->mem = resp->mem;
         conn->mem_len = resp->mem_len;

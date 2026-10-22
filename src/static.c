@@ -2,11 +2,13 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/openat2.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 int keel_path_normalize(const char *decoded, char *rel, size_t rel_cap, bool *trailing_slash) {
@@ -278,16 +280,246 @@ static void set_options(struct keel_response *resp, int http_minor, bool head_on
     snprintf(resp->content_type, sizeof resp->content_type, "text/plain; charset=utf-8");
 }
 
-static int serve_file(struct keel_response *resp, struct keel_opened *opened, const char *rel) {
+static int month_index(const char *mon) {
+    static const char *names[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    for (int i = 0; i < 12; i++) {
+        if (strcmp(mon, names[i]) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static bool parse_http_date(const char *text, time_t *out) {
+    int day = 0;
+    int year = 0;
+    int hour = 0;
+    int min = 0;
+    int sec = 0;
+    char mon[4];
+    if (sscanf(text, "%*[^,], %d %3s %d %d:%d:%d GMT", &day, mon, &year, &hour, &min, &sec) != 6) {
+        return false;
+    }
+    int mi = month_index(mon);
+    if (mi < 0 || day < 1 || day > 31 || hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 ||
+        sec > 60) {
+        return false;
+    }
+    struct tm tm;
+    memset(&tm, 0, sizeof tm);
+    tm.tm_mday = day;
+    tm.tm_mon = mi;
+    tm.tm_year = year - 1900;
+    tm.tm_hour = hour;
+    tm.tm_min = min;
+    tm.tm_sec = sec;
+    time_t when = timegm(&tm);
+    if (when == (time_t)-1) {
+        return false;
+    }
+    *out = when;
+    return true;
+}
+
+static bool etag_list_has(const char *list, const char *etag) {
+    if (strcmp(list, "*") == 0) {
+        return true;
+    }
+    const char *p = list;
+    size_t etag_len = strlen(etag);
+    while (*p != '\0') {
+        while (*p == ' ' || *p == '\t' || *p == ',') {
+            p++;
+        }
+        if (*p == '\0') {
+            break;
+        }
+        if (p[0] == 'W' && p[1] == '/') {
+            p += 2;
+        }
+        if (*p != '"') {
+            while (*p != '\0' && *p != ',') {
+                p++;
+            }
+            continue;
+        }
+        const char *start = p;
+        p++;
+        while (*p != '\0' && *p != '"') {
+            p++;
+        }
+        if (*p == '"') {
+            p++;
+        }
+        size_t n = (size_t)(p - start);
+        if (n == etag_len && memcmp(start, etag, n) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool not_modified(const struct keel_request *req, const char *etag, time_t mtime) {
+    if (req->has_if_none_match) {
+        return etag_list_has(req->if_none_match, etag);
+    }
+    if (req->has_if_modified_since) {
+        time_t since = 0;
+        if (!parse_http_date(req->if_modified_since, &since)) {
+            return false;
+        }
+        return mtime <= since;
+    }
+    return false;
+}
+
+static int parse_i64(const char *text, size_t n, long long *out) {
+    if (n == 0) {
+        return -1;
+    }
+    long long value = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (text[i] < '0' || text[i] > '9') {
+            return -1;
+        }
+        int digit = text[i] - '0';
+        if (value > (LLONG_MAX - digit) / 10) {
+            return -1;
+        }
+        value = value * 10 + digit;
+    }
+    *out = value;
+    return 0;
+}
+
+/* 0: one satisfiable range. 1: ignore the header. -1: unsatisfiable. */
+static int parse_byte_range(const char *header, off_t size, off_t *start, off_t *end) {
+    if (header == NULL || strncmp(header, "bytes=", 6) != 0) {
+        return 1;
+    }
+    const char *spec = header + 6;
+    if (spec[0] == '\0' || strchr(spec, ',') != NULL) {
+        return 1;
+    }
+    if (size <= 0) {
+        return -1;
+    }
+    if (spec[0] == '-') {
+        long long suffix = 0;
+        if (parse_i64(spec + 1, strlen(spec + 1), &suffix) != 0) {
+            return 1;
+        }
+        if (suffix <= 0) {
+            return -1;
+        }
+        if (suffix >= (long long)size) {
+            *start = 0;
+            *end = size - 1;
+            return 0;
+        }
+        *start = size - (off_t)suffix;
+        *end = size - 1;
+        return 0;
+    }
+    const char *dash = strchr(spec, '-');
+    if (dash == NULL) {
+        return 1;
+    }
+    long long first = 0;
+    if (parse_i64(spec, (size_t)(dash - spec), &first) != 0) {
+        return 1;
+    }
+    if (dash[1] == '\0') {
+        if (first >= (long long)size) {
+            return -1;
+        }
+        *start = (off_t)first;
+        *end = size - 1;
+        return 0;
+    }
+    long long last = 0;
+    if (parse_i64(dash + 1, strlen(dash + 1), &last) != 0) {
+        return 1;
+    }
+    if (first > last) {
+        return 1;
+    }
+    if (first >= (long long)size) {
+        return -1;
+    }
+    if (last >= (long long)size) {
+        last = (long long)size - 1;
+    }
+    *start = (off_t)first;
+    *end = (off_t)last;
+    return 0;
+}
+
+static void fill_validators(struct keel_response *resp, const struct keel_opened *opened) {
+    snprintf(resp->etag, sizeof resp->etag, "\"%llx-%llx\"", (unsigned long long)opened->size,
+             (unsigned long long)opened->mtime);
+    keel_format_http_date(resp->last_modified, sizeof resp->last_modified, opened->mtime);
+    resp->accept_ranges = true;
+}
+
+static int serve_file(struct keel_response *resp, const struct keel_request *req,
+                      struct keel_opened *opened, const char *rel) {
     if (opened->size < 0) {
         keel_opened_close(opened);
         keel_response_set_error(resp, 500, resp->http_minor);
         return 0;
     }
-    resp->status = 200;
+    fill_validators(resp, opened);
+    if (not_modified(req, resp->etag, opened->mtime)) {
+        keel_opened_close(opened);
+        resp->status = 304;
+        resp->omit_length = true;
+        resp->file_fd = -1;
+        resp->file_size = 0;
+        resp->mem = NULL;
+        resp->mem_len = 0;
+        return 0;
+    }
+
+    off_t start = 0;
+    off_t end = opened->size > 0 ? opened->size - 1 : 0;
+    bool partial = false;
+    if (req->has_range) {
+        int parsed = parse_byte_range(req->range, opened->size, &start, &end);
+        if (parsed < 0) {
+            off_t total = opened->size;
+            char etag[80];
+            char modified[64];
+            snprintf(etag, sizeof etag, "%s", resp->etag);
+            snprintf(modified, sizeof modified, "%s", resp->last_modified);
+            keel_opened_close(opened);
+            keel_response_set_error(resp, 416, resp->http_minor);
+            snprintf(resp->etag, sizeof resp->etag, "%s", etag);
+            snprintf(resp->last_modified, sizeof resp->last_modified, "%s", modified);
+            resp->accept_ranges = true;
+            resp->range_unsatisfiable = true;
+            resp->range_total = total;
+            return 0;
+        }
+        if (parsed == 0) {
+            partial = true;
+        }
+    }
+
+    resp->status = partial ? 206 : 200;
     resp->file_fd = opened->fd;
     opened->fd = -1;
-    resp->file_size = opened->size;
+    resp->body_off = partial ? start : 0;
+    if (partial) {
+        resp->file_size = end - start + 1;
+        resp->partial = true;
+        resp->range_start = start;
+        resp->range_end = end;
+        resp->range_total = opened->size;
+    } else {
+        resp->file_size = opened->size;
+    }
     snprintf(resp->content_type, sizeof resp->content_type, "%s", keel_mime_type(rel));
     resp->mem = NULL;
     resp->mem_len = 0;
@@ -399,7 +631,7 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
             keel_response_set_error(resp, 404, req->http_minor);
             return 0;
         }
-        return serve_file(resp, &opened, rel);
+        return serve_file(resp, req, &opened, rel);
     }
 
     keel_opened_close(&opened);
@@ -421,7 +653,7 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
     }
     st = keel_open_under_root(root_fd, index_rel, &opened);
     if (st == KEEL_OPEN_FILE) {
-        return serve_file(resp, &opened, index_rel);
+        return serve_file(resp, req, &opened, index_rel);
     }
     keel_opened_close(&opened);
     if (st == KEEL_OPEN_NOT_FOUND || st == KEEL_OPEN_DIR || st == KEEL_OPEN_FORBIDDEN) {
