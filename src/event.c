@@ -235,6 +235,7 @@ static int begin_write(struct keel_conn *conn, struct keel_loop *loop, struct ke
     if (resp->server[0] == '\0' && loop->server_header[0] != '\0') {
         snprintf(resp->server, sizeof resp->server, "%s", loop->server_header);
     }
+    keel_apply_error_page(resp, loop->root_fd);
     if (keel_format_head(resp, conn->head, sizeof conn->head, &conn->head_len) != 0) {
         return -1;
     }

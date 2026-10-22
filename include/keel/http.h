@@ -129,6 +129,7 @@ struct keel_response {
     bool partial;
     bool range_unsatisfiable;
     char server[64];
+    char content_encoding[32];
     char content_type[128];
     char date[64];
     char etag[80];

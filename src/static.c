@@ -470,13 +470,39 @@ static void fill_validators(struct keel_response *resp, const struct keel_opened
 }
 
 static int serve_file(struct keel_response *resp, const struct keel_request *req,
-                      struct keel_opened *opened, const char *rel) {
+                      struct keel_opened *opened, const char *rel, int root_fd) {
     if (opened->size < 0) {
         keel_opened_close(opened);
         keel_response_set_error(resp, 500, resp->http_minor);
         return 0;
     }
+    int encoded = 0;
+    if (req->accept_gzip && root_fd >= 0) {
+        size_t rel_len = strlen(rel);
+        int already_gz = rel_len >= 3 && strcmp(rel + rel_len - 3, ".gz") == 0;
+        if (!already_gz && rel_len + 3 < KEEL_PATH_MAX) {
+            char gz_rel[KEEL_PATH_MAX];
+            memcpy(gz_rel, rel, rel_len);
+            memcpy(gz_rel + rel_len, ".gz", 4);
+            struct keel_opened alt;
+            if (keel_open_under_root(root_fd, gz_rel, &alt) == KEEL_OPEN_FILE) {
+                keel_opened_close(opened);
+                *opened = alt;
+                encoded = 1;
+            } else {
+                keel_opened_close(&alt);
+            }
+        }
+    }
     fill_validators(resp, opened);
+    if (encoded) {
+        snprintf(resp->content_encoding, sizeof resp->content_encoding, "gzip");
+        size_t tag_len = strlen(resp->etag);
+        if (tag_len > 1 && resp->etag[tag_len - 1] == '"' && tag_len + 5 < sizeof resp->etag) {
+            resp->etag[tag_len - 1] = '\0';
+            snprintf(resp->etag + tag_len - 1, sizeof resp->etag - (tag_len - 1), "-gzip\"");
+        }
+    }
     if (not_modified(req, resp->etag, opened->mtime)) {
         keel_opened_close(opened);
         resp->status = 304;
@@ -848,7 +874,7 @@ int keel_prepare_site(const struct keel_request *req, int root_fd, const struct 
             keel_response_set_error(resp, 404, req->http_minor);
             return 0;
         }
-        return serve_file(resp, req, &opened, rel);
+        return serve_file(resp, req, &opened, rel, root_fd);
     }
 
     keel_opened_close(&opened);
@@ -870,7 +896,7 @@ int keel_prepare_site(const struct keel_request *req, int root_fd, const struct 
     }
     st = keel_open_under_root(root_fd, index_rel, &opened);
     if (st == KEEL_OPEN_FILE) {
-        return serve_file(resp, req, &opened, index_rel);
+        return serve_file(resp, req, &opened, index_rel, root_fd);
     }
     keel_opened_close(&opened);
     if (st == KEEL_OPEN_NOT_FOUND && site != NULL && site->directory_listing) {
@@ -892,4 +918,30 @@ int keel_prepare_static(const struct keel_request *req, int root_fd, const char 
         .server_name = NULL,
     };
     return keel_prepare_site(req, root_fd, &site, resp);
+}
+
+void keel_apply_error_page(struct keel_response *resp, int root_fd) {
+    if (resp == NULL || root_fd < 0 || resp->status < 400 || resp->file_fd >= 0) {
+        return;
+    }
+    char rel[32];
+    int nw = snprintf(rel, sizeof rel, "errors/%d.html", resp->status);
+    if (nw < 0 || (size_t)nw >= sizeof rel) {
+        return;
+    }
+    struct keel_opened opened;
+    if (keel_open_under_root(root_fd, rel, &opened) != KEEL_OPEN_FILE) {
+        keel_opened_close(&opened);
+        return;
+    }
+    if (resp->mem_owned != NULL) {
+        free(resp->mem_owned);
+        resp->mem_owned = NULL;
+    }
+    resp->file_fd = opened.fd;
+    resp->file_size = opened.size;
+    resp->body_off = 0;
+    resp->mem = NULL;
+    resp->mem_len = 0;
+    snprintf(resp->content_type, sizeof resp->content_type, "text/html; charset=utf-8");
 }

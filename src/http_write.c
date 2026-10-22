@@ -79,6 +79,10 @@ int keel_format_head(const struct keel_response *resp, char *dst, size_t cap, si
         }
         bprintf(&buf, "Content-Length: %llu\r\n", length);
     }
+    if (resp->content_encoding[0] != '\0') {
+        bprintf(&buf, "Content-Encoding: %s\r\n", resp->content_encoding);
+        bprintf(&buf, "Vary: Accept-Encoding\r\n");
+    }
     if (resp->etag[0] != '\0') {
         bprintf(&buf, "ETag: %s\r\n", resp->etag);
     }
