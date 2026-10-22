@@ -16,4 +16,10 @@ The binary is `./keel`. `make clean` removes it and the object tree under `build
 ./keel
 ```
 
-This scaffold prints the version and usage line. The listener comes next.
+keel listens on `0.0.0.0:8080`. Each accepted connection is logged and closed.
+
+## Test
+
+```bash
+make test
+```

@@ -6,11 +6,17 @@ CFLAGS  ?= -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prot
 LDFLAGS ?= -pthread
 BUILD   ?= build
 
-SRC := src/main.c
+SRC := src/main.c src/net.c
 OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
 
-.PHONY: all clean
+LIB_SRC := src/net.c
+LIB_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRC))
+
+TEST_SRC := $(wildcard tests/test_*.c)
+TEST_BIN := $(patsubst tests/%.c,$(BUILD)/%,$(TEST_SRC))
+
+.PHONY: all clean test
 
 all: keel
 
@@ -20,6 +26,13 @@ keel: $(OBJ)
 $(BUILD)/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -MMD -MP -c -o $@ $<
+
+$(BUILD)/test_%: tests/test_%.c $(LIB_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Itests -o $@ $< $(LIB_OBJ) $(LDFLAGS)
+
+test: $(TEST_BIN)
+	@set -e; for t in $(TEST_BIN); do echo "== $$t"; $$t; done
 
 clean:
 	rm -rf $(BUILD) keel
