@@ -16,8 +16,10 @@ LIB_OBJ := $(patsubst src/%.c,$(BUILD)/%.o,$(LIB_SRC))
 TEST_SRC := $(wildcard tests/test_*.c)
 TEST_BIN := $(patsubst tests/%.c,$(BUILD)/%,$(TEST_SRC))
 
-.PHONY: all clean test
+.PHONY: all clean test asan clean-objs
 .PRECIOUS: $(BUILD)/%.o
+
+-include $(BUILD)/sanitize.mk
 
 all: keel
 
@@ -39,6 +41,15 @@ $(BUILD)/integration: tests/integration.c
 test: keel $(TEST_BIN) $(BUILD)/integration
 	@set -e; for t in $(TEST_BIN); do echo "== $$t"; $$t; done
 	@echo "== $(BUILD)/integration"; $(BUILD)/integration
+
+asan:
+	mkdir -p $(BUILD)
+	printf 'CFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer\nLDFLAGS += -fsanitize=address,undefined\n' > $(BUILD)/sanitize.mk
+	$(MAKE) clean-objs
+	$(MAKE) all test
+
+clean-objs:
+	rm -f $(OBJ) $(TEST_BIN) $(BUILD)/integration keel
 
 clean:
 	rm -rf $(BUILD) keel
